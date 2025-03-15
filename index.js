@@ -9,7 +9,6 @@ mongoose
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// User schema for tracking warnings
 const userSchema = new mongoose.Schema({
   userId: Number,
   warnings: { type: Number, default: 0 },
@@ -18,13 +17,21 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// Function to check if the message contains a URL
 function containsUrl(text) {
   const urlRegex = /(https?:\/\/[^\s]+)/gi;
   return urlRegex.test(text);
 }
 
-// Function to auto-delete bot messages after 30 minutes
+async function isAdmin(ctx, userId) {
+  try {
+    const member = await ctx.telegram.getChatMember(ctx.chat.id, userId);
+    return ["administrator", "creator"].includes(member.status);
+  } catch (error) {
+    console.error("❌ Error checking admin status:", error);
+    return false;
+  }
+}
+
 async function autoDeleteMessage(ctx, messageId) {
   setTimeout(async () => {
     try {
@@ -32,16 +39,20 @@ async function autoDeleteMessage(ctx, messageId) {
     } catch (error) {
       console.error("❌ Failed to delete message:", error);
     }
-  }, 30 * 60 * 1000); // 30 minutes
+  }, 30 * 60 * 1000);
 }
 
-// Middleware to handle messages
 bot.on("message", async (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
   const userName = ctx.from.first_name;
 
   if (ctx.message.text && containsUrl(ctx.message.text)) {
+    if (await isAdmin(ctx, userId)) {
+      console.log(`✅ ${userName} (admin) sent a URL - Allowed.`);
+      return;
+    }
+
     try {
       let user = await User.findOne({ userId });
 
@@ -52,28 +63,22 @@ bot.on("message", async (ctx) => {
       user.warnings += 1;
 
       if (user.warnings < 3) {
-        await ctx.deleteMessage(); // Delete the message
+        await ctx.deleteMessage();
         const warningMsg = await ctx.reply(
-          `⚠️ ${userName}, you are not allowed to send links! Warning ${user.warnings}/3. After 3 warnings, you will be muted for 1 hour.`
+          `⚠️ ${userName}, sending links is not allowed! Warning ${user.warnings}/3. After 3 warnings, you will be muted for 1 hour.`
         );
-
-        autoDeleteMessage(ctx, warningMsg.message_id); // Auto-delete warning message
+        autoDeleteMessage(ctx, warningMsg.message_id);
       } else {
-        const muteUntil = new Date(Date.now() + 3600 * 1000); // 1 hour
-        user.mutedUntil = muteUntil;
+        const muteUntil = new Date(Date.now() + 3600 * 1000);
 
         await ctx.telegram.restrictChatMember(chatId, userId, {
           permissions: { can_send_messages: false },
           until_date: Math.floor(muteUntil.getTime() / 1000),
         });
 
-        const muteMsg = await ctx.reply(
-          `🔇 ${userName} has been muted for 1 hour due to repeated rule violations.`
-        );
-
-        autoDeleteMessage(ctx, muteMsg.message_id); // Auto-delete mute message
-
-        user.warnings = 0; // Reset warnings after mute
+        const muteMsg = await ctx.reply(`🔇 ${userName} has been muted for 1 hour due to repeated rule violations.`);
+        autoDeleteMessage(ctx, muteMsg.message_id);
+        user.warnings = 0;
       }
 
       await user.save();
@@ -86,6 +91,5 @@ bot.on("message", async (ctx) => {
 bot.launch();
 console.log("🚀 Bot is running...");
 
-// Graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
