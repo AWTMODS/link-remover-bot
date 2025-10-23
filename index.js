@@ -3,8 +3,8 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 // Bot Configuration
-const BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE';
-const ADMIN_IDS = []; // Add admin user IDs here
+const BOT_TOKEN = '7942179798:AAEXnmqGvzoCcDwggy1dpgi8RG_boMVR47I';
+const ADMIN_IDS = [1343548529]; // Add admin user IDs here
 const MAX_WARNINGS = 3;
 
 // Language scripts detection
