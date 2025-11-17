@@ -76,9 +76,7 @@ async function connectMongo() {
   const g = await globalsCol.findOne({ _id: 'globals' });
   if (!g) await globalsCol.insertOne({ _id: 'globals', whitelist: [], blacklist: [] });
 
-  // indexes (optional)
-  await groupsCol.createIndex({ _id: 1 }, { unique: true });
-  await statsCol.createIndex({ _id: 1 }, { unique: true });
+
 
   console.log('MongoDB connected.');
 }
