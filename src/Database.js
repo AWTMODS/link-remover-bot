@@ -4,22 +4,17 @@ class Database {
     constructor() {
         this.client = null;
         this.db = null;
-        this.groupsCol = null;
-        this.globalsCol = null;
-        this.statsCol = null;
-        this.warningsCol = null;
+        this.logChannelId = process.env.LOG_CHANNEL_ID || null;
 
         // Defaults
         this.defaults = {
-            captcha: process.env.DEFAULT_CAPTCHA === 'false' ? false : true,
-            autoBan: process.env.DEFAULT_AUTO_BAN === 'false' ? false : true,
-            floodLimit: parseInt(process.env.DEFAULT_FLOOD_LIMIT || '5'),
-            blockStickers: process.env.DEFAULT_BLOCK_STICKERS === 'true',
-            blockGifs: process.env.DEFAULT_BLOCK_GIFS === 'true',
-            blockVoice: process.env.DEFAULT_BLOCK_VOICE === 'true'
+            captcha: true,
+            autoBan: false,
+            floodLimit: 5,
+            blockStickers: false,
+            blockGifs: false,
+            blockVoice: false
         };
-
-        this.logChannelId = process.env.LOG_CHANNEL_ID;
     }
 
     async connect(uri) {
@@ -231,13 +226,15 @@ class Database {
     }
 
     async approveDomain(domain) {
-        await this.db.collection('pending_domains').deleteOne({ domain: domain.toLowerCase() });
-        // Add to global whitelist (or per-group if preferred, implementing global for now)
-        await this.globalsCol.updateOne(
-            { _id: 'globals' },
-            { $addToSet: { whitelistDomains: domain.toLowerCase() } },
-            { upsert: true }
-        );
+        await this.db.collection('pending_domains').deleteOne({ domain });
+        const globals = await this.getGlobals();
+        const arr = globals.whitelistDomains || [];
+        arr.push(domain);
+        await this.globalsCol.updateOne({}, { $set: { whitelistDomains: Array.from(new Set(arr)) } });
+    }
+
+    async denyPendingDomain(domain) {
+        await this.db.collection('pending_domains').deleteOne({ domain });
     }
 }
 

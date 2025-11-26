@@ -570,6 +570,18 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                         { text: `Limit: ${s.floodLimit || 5}`, callback_data: 'noop' },
                         { text: 'Flood +1', callback_data: `DASH_FLD_${groupId}_inc` }
                     ],
+                    [
+                        { text: '👥 Manage Users', callback_data: `DASH_USERS_${groupId}` },
+                        { text: '🌐 Manage Domains', callback_data: `DASH_DOMAINS_${groupId}` }
+                    ],
+                    [
+                        { text: '🚫 Manage Keywords', callback_data: `DASH_KEYWORDS_${groupId}` },
+                        { text: '⏳ Pending Domains', callback_data: `DASH_PENDING_${groupId}` }
+                    ],
+                    [
+                        { text: '📊 View Stats', callback_data: `DASH_STATS_${groupId}` },
+                        { text: '👤 User Info', callback_data: `DASH_USERINFO_${groupId}` }
+                    ],
                     [{ text: '« Back', callback_data: 'DASH_BACK' }]
                 ];
 
@@ -643,6 +655,155 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 }
                 const buttons = userGroups.map(g => [{ text: g.title, callback_data: `DASH_SEL_${g.id}` }]);
                 bot.editMessageText('Select a group to configure:', { chat_id: message.chat.id, message_id: message.message_id, reply_markup: { inline_keyboard: buttons } });
+            }
+
+            // --- Phase 4: Management UIs ---
+            else if (data.startsWith('DASH_USERS_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                const s = await db.getGroup(groupId);
+                const whitelist = s.whitelist || [];
+                const blacklist = s.blacklist || [];
+
+                let text = `👥 <b>User Management</b>\n\n`;
+                text += `<b>Whitelist (${whitelist.length}):</b>\n`;
+                whitelist.slice(0, 5).forEach(uid => text += `• ${uid}\n`);
+                if (whitelist.length > 5) text += `... and ${whitelist.length - 5} more\n`;
+
+                text += `\n<b>Blacklist (${blacklist.length}):</b>\n`;
+                blacklist.slice(0, 5).forEach(uid => text += `• ${uid}\n`);
+                if (blacklist.length > 5) text += `... and ${blacklist.length - 5} more\n`;
+
+                const kb = [
+                    [{ text: '➕ Add to Whitelist', callback_data: `DASH_ADDWL_${groupId}` }],
+                    [{ text: '➕ Add to Blacklist', callback_data: `DASH_ADDBL_${groupId}` }],
+                    [{ text: '« Back', callback_data: `DASH_SEL_${groupId}` }]
+                ];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_DOMAINS_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                const s = await db.getGroup(groupId);
+                const domains = s.whitelistDomains || [];
+
+                let text = `🌐 <b>Domain Whitelist (${domains.length})</b>\n\n`;
+                domains.slice(0, 10).forEach(d => text += `• ${d}\n`);
+                if (domains.length > 10) text += `... and ${domains.length - 10} more\n`;
+
+                const kb = [
+                    [{ text: '➕ Add Domain', callback_data: `DASH_ADDDOMAIN_${groupId}` }],
+                    [{ text: '« Back', callback_data: `DASH_SEL_${groupId}` }]
+                ];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_KEYWORDS_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                const s = await db.getGroup(groupId);
+                const keywords = s.blacklistWords || [];
+
+                let text = `🚫 <b>Keyword Blacklist (${keywords.length})</b>\n\n`;
+                keywords.slice(0, 10).forEach(k => text += `• ${k}\n`);
+                if (keywords.length > 10) text += `... and ${keywords.length - 10} more\n`;
+
+                const kb = [
+                    [{ text: '➕ Add Keyword', callback_data: `DASH_ADDKEYWORD_${groupId}` }],
+                    [{ text: '« Back', callback_data: `DASH_SEL_${groupId}` }]
+                ];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_PENDING_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                const pending = await db.getPendingDomains();
+
+                let text = `⏳ <b>Pending Domains (${pending.length})</b>\n\n`;
+                if (pending.length === 0) {
+                    text += `No pending domains.`;
+                } else {
+                    pending.slice(0, 5).forEach(p => text += `• ${p.domain} (by ${p.userId})\n`);
+                }
+
+                const kb = [];
+                pending.slice(0, 5).forEach(p => {
+                    kb.push([
+                        { text: `✅ ${p.domain}`, callback_data: `DASH_APPROVE_${groupId}_${p.domain}` },
+                        { text: `❌`, callback_data: `DASH_DENY_${groupId}_${p.domain}` }
+                    ]);
+                });
+                kb.push([{ text: '« Back', callback_data: `DASH_SEL_${groupId}` }]);
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_STATS_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                const stats = await db.getChatStats(groupId, 1);
+                const totalStats = await db.getStats(groupId);
+
+                let text = `📊 <b>Statistics (Last 24h)</b>\n\n`;
+                text += `💬 Messages: ${stats.messages}\n`;
+                text += `🚫 Bans: ${stats.bans}\n`;
+                text += `🗑️ Spam: ${stats.spam}\n`;
+                text += `👥 Active Users: ${stats.activeUsers}\n\n`;
+                text += `📈 <b>All-Time:</b>\n`;
+                text += `Banned: ${totalStats.banned || 0} | Deleted: ${totalStats.deleted || 0}`;
+
+                const kb = [[{ text: '« Back', callback_data: `DASH_SEL_${groupId}` }]];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_USERINFO_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                bot.answerCallbackQuery(query.id, { text: 'Send user ID as next message', show_alert: true });
+                // Store state for next message
+                // We'll handle this in a message listener below
+            }
+
+            else if (data.startsWith('DASH_APPROVE_')) {
+                const parts = data.split('_');
+                const groupId = parts[2];
+                const domain = parts.slice(3).join('_');
+
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                await db.approveDomain(domain);
+                bot.answerCallbackQuery(query.id, { text: `✅ ${domain} approved!` });
+
+                // Refresh
+                const newQuery = { ...query, data: `DASH_PENDING_${groupId}` };
+                bot.emit('callback_query', newQuery);
+            }
+
+            else if (data.startsWith('DASH_DENY_')) {
+                const parts = data.split('_');
+                const groupId = parts[2];
+                const domain = parts.slice(3).join('_');
+
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                await db.db.collection('pending_domains').deleteOne({ domain });
+                bot.answerCallbackQuery(query.id, { text: `❌ ${domain} denied.` });
+
+                // Refresh
+                const newQuery = { ...query, data: `DASH_PENDING_${groupId}` };
+                bot.emit('callback_query', newQuery);
             }
         }
     });
