@@ -76,25 +76,134 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
         }
     });
 
-    bot.onText(/\/ban\s+(\d+)/, async (msg, match) => {
+    // Helper for localization
+    async function getMsg(chatId, key, params = {}) {
+        return await moderator.getMsg(chatId, key, params);
+    }
+
+    bot.onText(/\/setlang\s+(en|es|fr|de|ru)/, async (msg, match) => {
+        const chatId = String(msg.chat.id);
+        if (!await isAdmin(chatId, msg.from.id)) return;
+        const lang = match[1].toLowerCase();
+        await db.upsertGroup(chatId, { language: lang });
+        const text = await getMsg(chatId, 'language_set', { lang });
+        bot.sendMessage(chatId, text);
+    });
+
+    bot.onText(/\/ban\s+(\d+)(?:\s+(\d+)([mhd]))?/, async (msg, match) => {
         const chatId = String(msg.chat.id);
         if (!await isAdmin(chatId, msg.from.id)) return;
         const uid = Number(match[1]);
-        try { await bot.banChatMember(chatId, uid); await db.incStat(chatId, 'banned'); bot.sendMessage(chatId, 'User banned.'); } catch (e) { bot.sendMessage(chatId, 'Failed to ban. Make sure I have admin rights.'); }
+        const durationVal = match[2] ? Number(match[2]) : null;
+        const durationUnit = match[3];
+
+        let duration = null;
+        if (durationVal && durationUnit) {
+            if (durationUnit === 'm') duration = durationVal * 60 * 1000;
+            if (durationUnit === 'h') duration = durationVal * 60 * 60 * 1000;
+            if (durationUnit === 'd') duration = durationVal * 24 * 60 * 60 * 1000;
+        }
+
+        try {
+            await bot.banChatMember(chatId, uid);
+            await db.incStat(chatId, 'banned');
+
+            if (duration) {
+                await db.addBan(chatId, uid, duration);
+                const text = await getMsg(chatId, 'temp_ban', { userId: uid, duration: `${durationVal}${durationUnit}` });
+                bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+            } else {
+                const text = await getMsg(chatId, 'ban_success', { userId: uid });
+                bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+            }
+        } catch (e) {
+            const text = await getMsg(chatId, 'ban_fail');
+            bot.sendMessage(chatId, text);
+        }
     });
 
     bot.onText(/\/unban\s+(\d+)/, async (msg, match) => {
         const chatId = String(msg.chat.id);
         if (!await isAdmin(chatId, msg.from.id)) return;
         const uid = Number(match[1]);
-        try { await bot.unbanChatMember(chatId, uid); bot.sendMessage(chatId, 'User unbanned.'); } catch (e) { bot.sendMessage(chatId, 'Failed to unban.'); }
+        try {
+            await bot.unbanChatMember(chatId, uid);
+            await db.removeBan(chatId, uid);
+            const text = await getMsg(chatId, 'unban_success');
+            bot.sendMessage(chatId, text);
+        } catch (e) {
+            const text = await getMsg(chatId, 'unban_fail');
+            bot.sendMessage(chatId, text);
+        }
+    });
+
+    bot.onText(/\/appeal\s+(.+)/, async (msg, match) => {
+        if (msg.chat.type !== 'private') return bot.sendMessage(msg.chat.id, 'Please send appeals in DM.');
+
+        const reason = match[1];
+        const userId = msg.from.id;
+
+        // Find which group they are banned from (simplified: check last ban or all active bans)
+        // For now, we'll just log it to the global appeals collection and notify admins of groups they are banned in.
+        // Since we don't track *which* group a user is banned in easily without querying all, we'll rely on the `bans` collection.
+
+        const activeBans = await db.db.collection('bans').find({ userId: Number(userId) }).toArray();
+
+        if (activeBans.length === 0) {
+            return bot.sendMessage(msg.chat.id, 'You do not appear to be banned from any known groups.');
+        }
+
+        for (const ban of activeBans) {
+            await db.logAppeal(ban.chatId, userId, reason);
+            const text = await getMsg(ban.chatId, 'appeal_received', { userId, name: msg.from.first_name, reason });
+
+            // Notify group log channel or admins
+            const g = await db.getGroup(ban.chatId);
+            // If log channel is set globally, use that. But appeals are per group.
+            // We'll send to the group itself or a log channel if we had one per group.
+            // Sending to the group might be spammy, but it's the best we have for now without a specific log channel per group.
+            // Better: DM the admins of that group.
+
+            try {
+                const admins = await bot.getChatAdministrators(ban.chatId);
+                for (const admin of admins) {
+                    if (!admin.user.is_bot) {
+                        try { await bot.sendMessage(admin.user.id, `[Appeal from ${g._id}]\n${text}`, { parse_mode: 'HTML' }); } catch (e) { }
+                    }
+                }
+            } catch (e) { }
+        }
+
+        bot.sendMessage(msg.chat.id, 'Appeal sent to group admins.');
     });
 
     bot.onText(/\/stats/, async (msg) => {
         const chatId = String(msg.chat.id);
         if (!await isAdmin(chatId, msg.from.id)) return;
-        const st = await db.getStats(chatId);
-        bot.sendMessage(chatId, `Stats: banned=${st.banned || 0} kicked=${st.kicked || 0} deleted=${st.deleted || 0}`);
+
+        const days = 1;
+        const stats = await db.getChatStats(chatId, days);
+        const totalStats = await db.getStats(chatId);
+
+        let text = `📊 <b>Advanced Statistics (Last 24h)</b>\n\n`;
+        text += `💬 <b>Messages:</b> ${stats.messages}\n`;
+        text += `🚫 <b>Bans:</b> ${stats.bans}\n`;
+        text += `🗑️ <b>Spam Deleted:</b> ${stats.spam}\n`;
+        text += `👥 <b>Active Users:</b> ${stats.activeUsers}\n\n`;
+
+        text += `🏆 <b>Top Active Users:</b>\n`;
+        if (stats.topUsers.length > 0) {
+            stats.topUsers.forEach((u, i) => {
+                text += `${i + 1}. <a href="tg://user?id=${u.userId}">${u.userId}</a>: ${u.count} msgs\n`;
+            });
+        } else {
+            text += `No activity recorded yet.\n`;
+        }
+
+        text += `\n📈 <b>All-Time Totals:</b>\n`;
+        text += `Banned: ${totalStats.banned || 0} | Deleted: ${totalStats.deleted || 0}`;
+
+        bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
     });
 
     bot.onText(/\/warn\s+(\d+)(?:\s+(.+))?/, async (msg, match) => {
@@ -111,13 +220,15 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 await bot.banChatMember(chatId, targetId);
                 await db.incStat(chatId, 'banned');
                 await db.clearWarnings(chatId, targetId);
-                bot.sendMessage(chatId, `🚫 <a href="tg://user?id=${targetId}">${targetId}</a> banned after 3 warnings.`, { parse_mode: 'HTML' });
+                const text = await getMsg(chatId, 'warn_ban', { userId: targetId });
+                bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
                 await db.logAction(bot, chatId, 'BAN_AUTO', `Target: ${targetId}\nReason: 3 Warnings`);
             } catch (e) {
                 bot.sendMessage(chatId, `Failed to ban ${targetId}: ${e.message}`);
             }
         } else {
-            bot.sendMessage(chatId, `⚠️ <a href="tg://user?id=${targetId}">${targetId}</a> warned (${count}/3).\nReason: ${reason}`, { parse_mode: 'HTML' });
+            const text = await getMsg(chatId, 'warn_success', { userId: targetId, count, reason });
+            bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
         }
     });
 

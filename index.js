@@ -32,6 +32,28 @@ async function start() {
     // Register Commands
     registerCommands(bot, db, moderator, captcha, ADMIN_IDS);
 
+    // Start Temp Ban Check Loop
+    setInterval(async () => {
+      try {
+        const expiredBans = await db.getActiveBans();
+        const now = Date.now();
+        for (const ban of expiredBans) {
+          if (ban.until && ban.until <= now) {
+            console.log(`Ban expired for ${ban.userId} in ${ban.chatId}`);
+            try {
+              await bot.unbanChatMember(ban.chatId, ban.userId);
+              await db.removeBan(ban.chatId, ban.userId);
+              await bot.sendMessage(ban.chatId, `✅ Ban expired for <a href="tg://user?id=${ban.userId}">${ban.userId}</a>.`, { parse_mode: 'HTML' });
+            } catch (e) {
+              console.error(`Failed to unban ${ban.userId}:`, e.message);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Ban check error:', e);
+      }
+    }, 60000); // Check every minute
+
     console.log('Bot started (Modular Version).');
   } catch (e) {
     console.error('Failed to start:', e);
