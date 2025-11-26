@@ -54,6 +54,17 @@ async function start() {
       }
     }, 60000); // Check every minute
 
+    // Daily Cleanup Task
+    setInterval(async () => {
+      try {
+        const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000); // 30 days ago
+        const result = await db.db.collection('activity_logs').deleteMany({ timestamp: { $lt: cutoff } });
+        console.log(`Cleanup: Deleted ${result.deletedCount} old activity logs.`);
+      } catch (e) {
+        console.error('Cleanup error:', e);
+      }
+    }, 24 * 60 * 60 * 1000); // Run daily
+
     console.log('Bot started (Modular Version).');
   } catch (e) {
     console.error('Failed to start:', e);

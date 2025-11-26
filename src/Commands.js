@@ -1,5 +1,27 @@
 module.exports = function (bot, db, moderator, captcha, adminIds) {
 
+    // State management for text inputs
+    const userStates = {}; // { userId: { action: 'ADDWL', groupId: '...' } }
+
+    // Rate limiting
+    const commandRates = {}; // { userId: [timestamps...] }
+    const RATE_LIMIT = 5; // commands per minute
+
+    function checkRateLimit(userId) {
+        const now = Date.now();
+        if (!commandRates[userId]) commandRates[userId] = [];
+
+        // Clean old timestamps
+        commandRates[userId] = commandRates[userId].filter(t => now - t < 60000);
+
+        if (commandRates[userId].length >= RATE_LIMIT) {
+            return false; // Rate limited
+        }
+
+        commandRates[userId].push(now);
+        return true;
+    }
+
     async function isAdmin(chatId, userId) {
         return await moderator.isUserAdmin(bot, chatId, userId, adminIds);
     }
@@ -684,6 +706,22 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
             }
 
+            else if (data.startsWith('DASH_ADDWL_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                userStates[userId] = { action: 'ADDWL', groupId };
+                bot.answerCallbackQuery(query.id, { text: 'Send user ID to add to whitelist', show_alert: true });
+            }
+
+            else if (data.startsWith('DASH_ADDBL_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                userStates[userId] = { action: 'ADDBL', groupId };
+                bot.answerCallbackQuery(query.id, { text: 'Send user ID to add to blacklist', show_alert: true });
+            }
+
             else if (data.startsWith('DASH_DOMAINS_')) {
                 const groupId = data.split('_')[2];
                 if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
@@ -703,6 +741,14 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
             }
 
+            else if (data.startsWith('DASH_ADDDOMAIN_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                userStates[userId] = { action: 'ADDDOMAIN', groupId };
+                bot.answerCallbackQuery(query.id, { text: 'Send domain to add (e.g., example.com)', show_alert: true });
+            }
+
             else if (data.startsWith('DASH_KEYWORDS_')) {
                 const groupId = data.split('_')[2];
                 if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
@@ -720,6 +766,14 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 ];
 
                 bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_ADDKEYWORD_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'Not admin.' });
+
+                userStates[userId] = { action: 'ADDKEYWORD', groupId };
+                bot.answerCallbackQuery(query.id, { text: 'Send keyword to blacklist', show_alert: true });
             }
 
             else if (data.startsWith('DASH_PENDING_')) {
@@ -805,6 +859,70 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 const newQuery = { ...query, data: `DASH_PENDING_${groupId}` };
                 bot.emit('callback_query', newQuery);
             }
+        }
+    });
+
+    // Text input handler for dashboard actions
+    bot.on('message', async (msg) => {
+        if (!msg.text || msg.chat.type !== 'private') return;
+
+        const userId = msg.from.id;
+        const state = userStates[userId];
+
+        if (!state) return; // No pending action
+
+        const input = msg.text.trim();
+
+        try {
+            if (state.action === 'ADDWL') {
+                const targetId = Number(input);
+                if (isNaN(targetId)) {
+                    bot.sendMessage(userId, '❌ Invalid user ID. Please enter a numeric ID.');
+                    return;
+                }
+
+                const s = await db.getGroup(state.groupId);
+                const arr = s.whitelist || [];
+                arr.push(targetId);
+                await db.upsertGroup(state.groupId, { whitelist: Array.from(new Set(arr)) });
+                bot.sendMessage(userId, `✅ User ${targetId} added to whitelist.`);
+                delete userStates[userId];
+            }
+            else if (state.action === 'ADDBL') {
+                const targetId = Number(input);
+                if (isNaN(targetId)) {
+                    bot.sendMessage(userId, '❌ Invalid user ID. Please enter a numeric ID.');
+                    return;
+                }
+
+                const s = await db.getGroup(state.groupId);
+                const arr = s.blacklist || [];
+                arr.push(targetId);
+                await db.upsertGroup(state.groupId, { blacklist: Array.from(new Set(arr)) });
+                bot.sendMessage(userId, `✅ User ${targetId} added to blacklist.`);
+                delete userStates[userId];
+            }
+            else if (state.action === 'ADDDOMAIN') {
+                const domain = input.toLowerCase();
+                const s = await db.getGroup(state.groupId);
+                const arr = s.whitelistDomains || [];
+                arr.push(domain);
+                await db.upsertGroup(state.groupId, { whitelistDomains: Array.from(new Set(arr)) });
+                bot.sendMessage(userId, `✅ Domain ${domain} added to whitelist.`);
+                delete userStates[userId];
+            }
+            else if (state.action === 'ADDKEYWORD') {
+                const keyword = input.toLowerCase();
+                const s = await db.getGroup(state.groupId);
+                const arr = s.blacklistWords || [];
+                arr.push(keyword);
+                await db.upsertGroup(state.groupId, { blacklistWords: Array.from(new Set(arr)) });
+                bot.sendMessage(userId, `✅ Keyword "${keyword}" added to blacklist.`);
+                delete userStates[userId];
+            }
+        } catch (e) {
+            bot.sendMessage(userId, `❌ Error: ${e.message}`);
+            delete userStates[userId];
         }
     });
 };
