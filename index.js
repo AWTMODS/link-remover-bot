@@ -53,6 +53,13 @@ bot.on('message', async (msg) => {
       const globals = await db.getGlobals();
 
       for (const user of msg.new_chat_members) {
+        // Raid Mode Check
+        if (settings.raidMode) {
+          console.log(`Raid Mode Active! Banning ${user.id}`);
+          try { await bot.banChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { console.error('Raid ban error:', e.message); }
+          continue;
+        }
+
         if (user.is_bot) {
           try { await bot.banChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { console.error('Bot ban error:', e.message); }
           continue;

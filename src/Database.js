@@ -64,7 +64,10 @@ class Database {
                 blacklistWords: [],
                 blockStickers: this.defaults.blockStickers,
                 blockGifs: this.defaults.blockGifs,
-                blockVoice: this.defaults.blockVoice
+                blockVoice: this.defaults.blockVoice,
+                blockForwards: false,
+                raidMode: false,
+                linkFilterLevel: 'whitelist' // 'strict', 'whitelist', 'off'
             };
             await this.groupsCol.insertOne(g);
         }

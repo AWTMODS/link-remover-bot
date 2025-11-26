@@ -347,24 +347,43 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 const s = await db.getGroup(groupId);
                 const chat = await bot.getChat(groupId);
 
-                const text = `Settings for <b>${chat.title}</b>:\n\n` +
+                const text = `⚙️ <b>Settings for ${chat.title}</b>\n\n` +
+                    `🛡️ <b>Security</b>\n` +
                     `Captcha: ${s.captcha ? '✅' : '❌'}\n` +
                     `AutoBan: ${s.autoBan ? '✅' : '❌'}\n` +
-                    `Block Stickers: ${s.blockStickers ? '✅' : '❌'}\n` +
-                    `Block GIFs: ${s.blockGifs ? '✅' : '❌'}\n` +
-                    `Block Voice: ${s.blockVoice ? '✅' : '❌'}`;
+                    `Raid Mode: ${s.raidMode ? '🚨 ON' : 'Off'}\n\n` +
+                    `🚫 <b>Filters</b>\n` +
+                    `Anti-Forward: ${s.blockForwards ? '✅' : '❌'}\n` +
+                    `Link Filter: <b>${(s.linkFilterLevel || 'whitelist').toUpperCase()}</b>\n` +
+                    `Stickers: ${s.blockStickers ? '🚫' : '✅'}\n` +
+                    `GIFs: ${s.blockGifs ? '🚫' : '✅'}\n` +
+                    `Voice: ${s.blockVoice ? '🚫' : '✅'}\n\n` +
+                    `🌊 <b>Flood Control</b>\n` +
+                    `Limit: ${s.floodLimit || 5} msgs / ${s.floodWindowSec || 7}s`;
 
                 const kb = [
                     [
-                        { text: `Captcha ${s.captcha ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_captcha` },
-                        { text: `AutoBan ${s.autoBan ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_autoBan` }
+                        { text: `Captcha ${s.captcha ? '✅' : '❌'}`, callback_data: `DASH_TOG_${groupId}_captcha` },
+                        { text: `AutoBan ${s.autoBan ? '✅' : '❌'}`, callback_data: `DASH_TOG_${groupId}_autoBan` }
                     ],
                     [
-                        { text: `Stickers ${s.blockStickers ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockStickers` },
-                        { text: `GIFs ${s.blockGifs ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockGifs` }
+                        { text: `🚨 Raid Mode ${s.raidMode ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_raidMode` }
                     ],
                     [
-                        { text: `Voice ${s.blockVoice ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockVoice` }
+                        { text: `Anti-Fwd ${s.blockForwards ? '✅' : '❌'}`, callback_data: `DASH_TOG_${groupId}_blockForwards` },
+                        { text: `Links: ${s.linkFilterLevel || 'whitelist'}`, callback_data: `DASH_CYC_${groupId}_linkFilterLevel` }
+                    ],
+                    [
+                        { text: `Stickers ${s.blockStickers ? '🚫' : '✅'}`, callback_data: `DASH_TOG_${groupId}_blockStickers` },
+                        { text: `GIFs ${s.blockGifs ? '🚫' : '✅'}`, callback_data: `DASH_TOG_${groupId}_blockGifs` }
+                    ],
+                    [
+                        { text: `Voice ${s.blockVoice ? '🚫' : '✅'}`, callback_data: `DASH_TOG_${groupId}_blockVoice` }
+                    ],
+                    [
+                        { text: 'Flood -1', callback_data: `DASH_FLD_${groupId}_dec` },
+                        { text: `Limit: ${s.floodLimit || 5}`, callback_data: 'noop' },
+                        { text: 'Flood +1', callback_data: `DASH_FLD_${groupId}_inc` }
                     ],
                     [{ text: '« Back', callback_data: 'DASH_BACK' }]
                 ];
@@ -383,34 +402,46 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 const newVal = !s[key];
                 await db.upsertGroup(groupId, { [key]: newVal });
 
-                // Refresh view
-                // Re-trigger DASH_SEL logic
-                const chat = await bot.getChat(groupId);
-                const sNew = await db.getGroup(groupId); // reload
+                // Refresh
+                const newQuery = { ...query, data: `DASH_SEL_${groupId}` };
+                bot.emit('callback_query', newQuery);
+            }
 
-                const text = `Settings for <b>${chat.title}</b>:\n\n` +
-                    `Captcha: ${sNew.captcha ? '✅' : '❌'}\n` +
-                    `AutoBan: ${sNew.autoBan ? '✅' : '❌'}\n` +
-                    `Block Stickers: ${sNew.blockStickers ? '✅' : '❌'}\n` +
-                    `Block GIFs: ${sNew.blockGifs ? '✅' : '❌'}\n` +
-                    `Block Voice: ${sNew.blockVoice ? '✅' : '❌'}`;
+            else if (data.startsWith('DASH_CYC_')) {
+                const parts = data.split('_');
+                const groupId = parts[2];
+                // const key = parts[3]; // always linkFilterLevel for now
 
-                const kb = [
-                    [
-                        { text: `Captcha ${sNew.captcha ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_captcha` },
-                        { text: `AutoBan ${sNew.autoBan ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_autoBan` }
-                    ],
-                    [
-                        { text: `Stickers ${sNew.blockStickers ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockStickers` },
-                        { text: `GIFs ${sNew.blockGifs ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockGifs` }
-                    ],
-                    [
-                        { text: `Voice ${sNew.blockVoice ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockVoice` }
-                    ],
-                    [{ text: '« Back', callback_data: 'DASH_BACK' }]
-                ];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'You are not an admin there.' });
 
-                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+                const s = await db.getGroup(groupId);
+                const current = s.linkFilterLevel || 'whitelist';
+                const next = current === 'whitelist' ? 'strict' : (current === 'strict' ? 'off' : 'whitelist');
+
+                await db.upsertGroup(groupId, { linkFilterLevel: next });
+
+                // Refresh
+                const newQuery = { ...query, data: `DASH_SEL_${groupId}` };
+                bot.emit('callback_query', newQuery);
+            }
+
+            else if (data.startsWith('DASH_FLD_')) {
+                const parts = data.split('_');
+                const groupId = parts[2];
+                const action = parts[3];
+
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'You are not an admin there.' });
+
+                const s = await db.getGroup(groupId);
+                let val = s.floodLimit || 5;
+                if (action === 'inc') val++;
+                if (action === 'dec') val = Math.max(1, val - 1);
+
+                await db.upsertGroup(groupId, { floodLimit: val });
+
+                // Refresh
+                const newQuery = { ...query, data: `DASH_SEL_${groupId}` };
+                bot.emit('callback_query', newQuery);
             }
 
             else if (data === 'DASH_BACK') {

@@ -128,14 +128,30 @@ class Moderator {
             return;
         }
 
+        // 3.5) Anti-Forward
+        if (settings.blockForwards && (msg.forward_date || msg.forward_from || msg.forward_from_chat)) {
+            await this.deleteAndAct(bot, chatId, userId, msg.message_id, 'Forwarded message blocked');
+            return;
+        }
+
         // 4) link spam
         if (this.urlRegex.test(lower)) {
-            const allowedDomains = settings.whitelistDomains || [];
-            const isWhitelisted = allowedDomains.some(d => lower.includes(d.toLowerCase()));
+            const level = settings.linkFilterLevel || 'whitelist';
 
-            if (!isWhitelisted) {
-                await this.deleteAndAct(bot, chatId, userId, msg.message_id, 'Link detected');
+            if (level === 'off') {
+                // Do nothing, links allowed
+            } else if (level === 'strict') {
+                await this.deleteAndAct(bot, chatId, userId, msg.message_id, 'Links are strictly prohibited');
                 return;
+            } else {
+                // Whitelist mode (default)
+                const allowedDomains = settings.whitelistDomains || [];
+                const isWhitelisted = allowedDomains.some(d => lower.includes(d.toLowerCase()));
+
+                if (!isWhitelisted) {
+                    await this.deleteAndAct(bot, chatId, userId, msg.message_id, 'Link detected');
+                    return;
+                }
             }
         }
 
