@@ -173,7 +173,10 @@ class Moderator {
             const cutoff = now - (settings.floodWindowSec || 7) * 1000;
             this.messageWindow[chatId][userId] = this.messageWindow[chatId][userId].filter(ts => ts > cutoff);
 
+            console.log(`Flood check for ${userId}: ${this.messageWindow[chatId][userId].length} msgs in window.`);
+
             if (this.messageWindow[chatId][userId].length > (settings.floodLimit || 5)) {
+                console.log(`Flood detected for ${userId}. Limit: ${settings.floodLimit}`);
                 await this.deleteAndAct(bot, chatId, userId, msg.message_id, 'Flooding');
                 this.messageWindow[chatId][userId] = [];
                 return;
