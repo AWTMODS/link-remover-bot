@@ -112,8 +112,12 @@ bot.on('message', async (msg) => {
         await moderator.moderate(bot, msg, ADMIN_IDS);
       }
     }
-    process.on('SIGTERM', async () => {
-      console.log('Shutting down...');
-      await db.close();
-      process.exit();
-    });
+  } catch (err) {
+    console.error('Message handler error:', err);
+  }
+});
+process.on('SIGTERM', async () => {
+  console.log('Shutting down...');
+  await db.close();
+  process.exit();
+});
