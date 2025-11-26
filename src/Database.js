@@ -30,6 +30,8 @@ class Database {
         this.globalsCol = this.db.collection('globals');
         this.statsCol = this.db.collection('stats');
         this.warningsCol = this.db.collection('warnings');
+        this.usersCol = this.db.collection('users'); // Global reputation
+        this.rolesCol = this.db.collection('roles'); // Custom roles
 
         // Ensure globals
         const g = await this.globalsCol.findOne({ _id: 'globals' });
@@ -67,7 +69,9 @@ class Database {
                 blockVoice: this.defaults.blockVoice,
                 blockForwards: false,
                 raidMode: false,
-                linkFilterLevel: 'whitelist' // 'strict', 'whitelist', 'off'
+                linkFilterLevel: 'whitelist', // 'strict', 'whitelist', 'off'
+                ocrEnabled: false,
+                reputationEnabled: true
             };
             await this.groupsCol.insertOne(g);
         }
@@ -111,6 +115,32 @@ class Database {
         if (this.logChannelId) {
             try { await bot.sendMessage(this.logChannelId, msg); } catch (e) { console.error('Failed to log to channel:', e.message); }
         }
+    }
+
+    async updateReputation(userId, change) {
+        await this.usersCol.updateOne(
+            { _id: Number(userId) },
+            { $inc: { reputation: change }, $setOnInsert: { lastSeen: Date.now() } },
+            { upsert: true }
+        );
+    }
+
+    async getReputation(userId) {
+        const u = await this.usersCol.findOne({ _id: Number(userId) });
+        return u ? (u.reputation || 0) : 0;
+    }
+
+    async setRole(chatId, userId, role) {
+        await this.rolesCol.updateOne(
+            { chatId: String(chatId), userId: Number(userId) },
+            { $set: { role } },
+            { upsert: true }
+        );
+    }
+
+    async getRole(chatId, userId) {
+        const r = await this.rolesCol.findOne({ chatId: String(chatId), userId: Number(userId) });
+        return r ? r.role : null;
     }
 }
 

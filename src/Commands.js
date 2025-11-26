@@ -289,6 +289,80 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
         }
     });
 
+    // ---- Phase 1: Advanced Management ----
+
+    bot.onText(/\/backup/, async (msg) => {
+        const chatId = String(msg.chat.id);
+        if (!await isAdmin(chatId, msg.from.id)) return;
+
+        const s = await db.getGroup(chatId);
+        const json = JSON.stringify(s, null, 2);
+        const buffer = Buffer.from(json, 'utf8');
+
+        await bot.sendDocument(chatId, buffer, { caption: `Backup for ${msg.chat.title}`, contentType: 'application/json' }, { filename: `backup_${chatId}.json` });
+    });
+
+    bot.onText(/\/restore/, async (msg) => {
+        const chatId = String(msg.chat.id);
+        if (!await isAdmin(chatId, msg.from.id)) return;
+
+        if (!msg.reply_to_message || !msg.reply_to_message.document) {
+            return bot.sendMessage(chatId, 'Reply to a JSON backup file to restore settings.');
+        }
+
+        try {
+            const fileId = msg.reply_to_message.document.file_id;
+            const link = await bot.getFileLink(fileId);
+
+            // Fetch workaround
+            let fetchFn;
+            try { fetchFn = require('node-fetch'); if (fetchFn.default) fetchFn = fetchFn.default; } catch (e) { fetchFn = global.fetch; }
+
+            const res = await fetchFn(link);
+            const data = await res.json();
+
+            // Validate basic structure
+            if (!data._id || !data.captcha === undefined) throw new Error('Invalid backup file');
+
+            delete data._id; // Don't overwrite ID
+            await db.upsertGroup(chatId, data);
+            bot.sendMessage(chatId, '✅ Settings restored successfully.');
+        } catch (e) {
+            bot.sendMessage(chatId, `Failed to restore: ${e.message}`);
+        }
+    });
+
+    bot.onText(/\/promote\s+(\d+)\s+(admin|mod)/, async (msg, match) => {
+        const chatId = String(msg.chat.id);
+        // Only owner/creator can promote (simplified check)
+        const admins = await bot.getChatAdministrators(chatId);
+        const isOwner = admins.some(a => a.user.id === msg.from.id && a.status === 'creator');
+
+        if (!isOwner && !adminIds.includes(msg.from.id)) return bot.sendMessage(chatId, 'Only the group creator can promote bot roles.');
+
+        const targetId = Number(match[1]);
+        const role = match[2];
+        await db.setRole(chatId, targetId, role);
+        bot.sendMessage(chatId, `User ${targetId} promoted to ${role}.`);
+    });
+
+    bot.onText(/\/demote\s+(\d+)/, async (msg, match) => {
+        const chatId = String(msg.chat.id);
+        const admins = await bot.getChatAdministrators(chatId);
+        const isOwner = admins.some(a => a.user.id === msg.from.id && a.status === 'creator');
+
+        if (!isOwner && !adminIds.includes(msg.from.id)) return bot.sendMessage(chatId, 'Only the group creator can demote.');
+
+        const targetId = Number(match[1]);
+        await db.setRole(chatId, targetId, null);
+        bot.sendMessage(chatId, `User ${targetId} demoted.`);
+    });
+
+    bot.onText(/\/myrep/, async (msg) => {
+        const rep = await db.getReputation(msg.from.id);
+        bot.sendMessage(msg.chat.id, `Your Reputation Score: ${rep}`);
+    });
+
     // ---- Callback Query Handler ----
     bot.on('callback_query', async (query) => {
         const { data, message, from } = query;
