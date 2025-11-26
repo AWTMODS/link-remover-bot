@@ -30,7 +30,7 @@ async function start() {
     await db.connect(MONGO_URI);
 
     // Register Commands
-    registerCommands(bot, db, moderator, ADMIN_IDS);
+    registerCommands(bot, db, moderator, captcha, ADMIN_IDS);
 
     console.log('Bot started (Modular Version).');
   } catch (e) {
@@ -70,7 +70,15 @@ bot.on('message', async (msg) => {
               .replace('{id}', user.id)
               .replace('{group}', msg.chat.title);
 
-            const sent = await bot.sendMessage(chatId, `${welcomeText}\n\nPlease solve this captcha within 120 seconds: ${cap.question}`);
+            const opts = {
+              reply_markup: {
+                inline_keyboard: [
+                  cap.options.map(opt => ({ text: String(opt), callback_data: `CAPTCHA_${user.id}_${opt}` }))
+                ]
+              }
+            };
+
+            const sent = await bot.sendMessage(chatId, `${welcomeText}\n\nPlease solve this captcha within 120 seconds: ${cap.question}`, opts);
             // Update stored captcha with message ID
             const stored = captcha.get(chatId, user.id);
             if (stored) stored.welcomeMsgId = sent.message_id;
@@ -95,59 +103,17 @@ bot.on('message', async (msg) => {
       }
     }
 
-    // 2. Captcha Answers or Normal Messages
+    // 2. Normal Messages (Captcha text fallback removed, only buttons now)
     if (msg.text) {
       const chatId = String(msg.chat.id);
-      const userId = msg.from.id;
-      const stored = captcha.get(chatId, userId);
-
-      if (stored) {
-        if (Date.now() > stored.expiresAt) { captcha.delete(chatId, userId); return; }
-        const num = parseInt(msg.text.trim());
-
-        if (!isNaN(num) && num === stored.answer) {
-          // Solved
-          try {
-            await bot.restrictChatMember(chatId, userId, {
-              can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
-            });
-            await bot.sendMessage(chatId, `✅ <a href="tg://user?id=${userId}">${msg.from.first_name}</a> passed the captcha.`, { parse_mode: 'HTML' });
-          } catch (e) { }
-          captcha.delete(chatId, userId);
-          return;
-        } else {
-          // Wrong answer
-          stored.tries++;
-          if (stored.tries >= 3) {
-            try { await bot.kickChatMember(chatId, userId); await db.incStat(chatId, 'banned'); } catch (e) { }
-            captcha.delete(chatId, userId);
-            return;
-          } else {
-            try { await bot.sendMessage(chatId, `❌ Wrong answer. Try again. (${3 - stored.tries} tries left)`, { reply_to_message_id: stored.welcomeMsgId }); } catch (e) { }
-            return;
-          }
-        }
-      }
 
       // 3. Normal Moderation
       if (msg.chat.type && (msg.chat.type.endsWith('group') || msg.chat.type === 'supergroup')) {
         await moderator.moderate(bot, msg, ADMIN_IDS);
       }
     }
-
-  } catch (err) {
-    console.error('Message handler error:', err);
-  }
-});
-
-// ---- Graceful Shutdown ----
-process.on('SIGINT', async () => {
-  console.log('Shutting down...');
-  await db.close();
-  process.exit();
-});
-process.on('SIGTERM', async () => {
-  console.log('Shutting down...');
-  await db.close();
-  process.exit();
-});
+    process.on('SIGTERM', async () => {
+      console.log('Shutting down...');
+      await db.close();
+      process.exit();
+    });

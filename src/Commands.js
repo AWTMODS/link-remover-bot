@@ -1,15 +1,45 @@
-module.exports = function (bot, db, moderator, adminIds) {
+module.exports = function (bot, db, moderator, captcha, adminIds) {
 
     async function isAdmin(chatId, userId) {
         return await moderator.isUserAdmin(bot, chatId, userId, adminIds);
     }
 
+    // ---- Commands ----
+
     bot.onText(/\/settings/, async (msg) => {
         const chatId = String(msg.chat.id);
-        if (!await isAdmin(chatId, msg.from.id)) return;
-        const s = await db.getGroup(chatId);
-        const text = `Current settings:\nCaptcha: ${s.captcha}\nAutoBan: ${s.autoBan}\nFloodLimit: ${s.floodLimit} msgs / ${s.floodWindowSec}s\nWelcome: ${s.welcome}`;
-        bot.sendMessage(chatId, text);
+        const userId = msg.from.id;
+
+        if (msg.chat.type === 'private') {
+            // DM Dashboard
+            const allGroups = await db.groupsCol.find({}).toArray();
+            const userGroups = [];
+
+            for (const g of allGroups) {
+                try {
+                    if (await isAdmin(g._id, userId)) {
+                        const chat = await bot.getChat(g._id);
+                        userGroups.push({ id: g._id, title: chat.title || 'Unknown Group' });
+                    }
+                } catch (e) { /* Bot might be kicked */ }
+            }
+
+            if (userGroups.length === 0) {
+                return bot.sendMessage(chatId, 'You do not appear to be an admin of any groups I am in.');
+            }
+
+            const buttons = userGroups.map(g => [{ text: g.title, callback_data: `DASH_SEL_${g.id}` }]);
+            bot.sendMessage(chatId, 'Select a group to configure:', {
+                reply_markup: { inline_keyboard: buttons }
+            });
+
+        } else {
+            // Group Settings View
+            if (!await isAdmin(chatId, userId)) return;
+            const s = await db.getGroup(chatId);
+            const text = `Current settings:\nCaptcha: ${s.captcha}\nAutoBan: ${s.autoBan}\nFloodLimit: ${s.floodLimit} msgs / ${s.floodWindowSec}s\nWelcome: ${s.welcome}`;
+            bot.sendMessage(chatId, text);
+        }
     });
 
     bot.onText(/\/setwelcome\s+([\s\S]+)/, async (msg, match) => {
@@ -256,6 +286,148 @@ module.exports = function (bot, db, moderator, adminIds) {
             bot.sendMessage(chatId, info, { parse_mode: 'HTML' });
         } catch (e) {
             bot.sendMessage(chatId, 'User not found or error fetching info.');
+        }
+    });
+
+    // ---- Callback Query Handler ----
+    bot.on('callback_query', async (query) => {
+        const { data, message, from } = query;
+
+        // 1. Captcha Handler
+        if (data.startsWith('CAPTCHA_')) {
+            const chatId = String(message.chat.id);
+            const parts = data.split('_');
+            const targetUserId = Number(parts[1]);
+            const selectedAnswer = Number(parts[2]);
+
+            if (from.id !== targetUserId) {
+                return bot.answerCallbackQuery(query.id, { text: 'This captcha is not for you!', show_alert: true });
+            }
+
+            const stored = captcha.get(chatId, targetUserId);
+            if (!stored) {
+                return bot.answerCallbackQuery(query.id, { text: 'Captcha expired or invalid.', show_alert: true });
+            }
+
+            if (selectedAnswer === stored.answer) {
+                // Correct
+                try {
+                    await bot.restrictChatMember(chatId, targetUserId, {
+                        can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
+                    });
+                    await bot.deleteMessage(chatId, message.message_id);
+                    await bot.sendMessage(chatId, `✅ <a href="tg://user?id=${targetUserId}">${from.first_name}</a> passed the captcha.`, { parse_mode: 'HTML' });
+                } catch (e) { }
+                captcha.delete(chatId, targetUserId);
+            } else {
+                // Wrong
+                stored.tries++;
+                if (stored.tries >= 3) {
+                    try {
+                        await bot.kickChatMember(chatId, targetUserId);
+                        await db.incStat(chatId, 'banned');
+                        await bot.deleteMessage(chatId, message.message_id);
+                    } catch (e) { }
+                    captcha.delete(chatId, targetUserId);
+                } else {
+                    bot.answerCallbackQuery(query.id, { text: `Wrong answer! ${3 - stored.tries} tries left.`, show_alert: true });
+                }
+            }
+            return;
+        }
+
+        // 2. Dashboard Handler
+        if (data.startsWith('DASH_')) {
+            const userId = from.id;
+
+            if (data.startsWith('DASH_SEL_')) {
+                const groupId = data.split('_')[2];
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'You are not an admin there.' });
+
+                const s = await db.getGroup(groupId);
+                const chat = await bot.getChat(groupId);
+
+                const text = `Settings for <b>${chat.title}</b>:\n\n` +
+                    `Captcha: ${s.captcha ? '✅' : '❌'}\n` +
+                    `AutoBan: ${s.autoBan ? '✅' : '❌'}\n` +
+                    `Block Stickers: ${s.blockStickers ? '✅' : '❌'}\n` +
+                    `Block GIFs: ${s.blockGifs ? '✅' : '❌'}\n` +
+                    `Block Voice: ${s.blockVoice ? '✅' : '❌'}`;
+
+                const kb = [
+                    [
+                        { text: `Captcha ${s.captcha ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_captcha` },
+                        { text: `AutoBan ${s.autoBan ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_autoBan` }
+                    ],
+                    [
+                        { text: `Stickers ${s.blockStickers ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockStickers` },
+                        { text: `GIFs ${s.blockGifs ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockGifs` }
+                    ],
+                    [
+                        { text: `Voice ${s.blockVoice ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockVoice` }
+                    ],
+                    [{ text: '« Back', callback_data: 'DASH_BACK' }]
+                ];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data.startsWith('DASH_TOG_')) {
+                const parts = data.split('_');
+                const groupId = parts[2];
+                const key = parts[3];
+
+                if (!await isAdmin(groupId, userId)) return bot.answerCallbackQuery(query.id, { text: 'You are not an admin there.' });
+
+                const s = await db.getGroup(groupId);
+                const newVal = !s[key];
+                await db.upsertGroup(groupId, { [key]: newVal });
+
+                // Refresh view
+                // Re-trigger DASH_SEL logic
+                const chat = await bot.getChat(groupId);
+                const sNew = await db.getGroup(groupId); // reload
+
+                const text = `Settings for <b>${chat.title}</b>:\n\n` +
+                    `Captcha: ${sNew.captcha ? '✅' : '❌'}\n` +
+                    `AutoBan: ${sNew.autoBan ? '✅' : '❌'}\n` +
+                    `Block Stickers: ${sNew.blockStickers ? '✅' : '❌'}\n` +
+                    `Block GIFs: ${sNew.blockGifs ? '✅' : '❌'}\n` +
+                    `Block Voice: ${sNew.blockVoice ? '✅' : '❌'}`;
+
+                const kb = [
+                    [
+                        { text: `Captcha ${sNew.captcha ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_captcha` },
+                        { text: `AutoBan ${sNew.autoBan ? 'ON' : 'OFF'}`, callback_data: `DASH_TOG_${groupId}_autoBan` }
+                    ],
+                    [
+                        { text: `Stickers ${sNew.blockStickers ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockStickers` },
+                        { text: `GIFs ${sNew.blockGifs ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockGifs` }
+                    ],
+                    [
+                        { text: `Voice ${sNew.blockVoice ? 'BLOCK' : 'ALLOW'}`, callback_data: `DASH_TOG_${groupId}_blockVoice` }
+                    ],
+                    [{ text: '« Back', callback_data: 'DASH_BACK' }]
+                ];
+
+                bot.editMessageText(text, { chat_id: message.chat.id, message_id: message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+            }
+
+            else if (data === 'DASH_BACK') {
+                // Show list again
+                const allGroups = await db.groupsCol.find({}).toArray();
+                const userGroups = [];
+                for (const g of allGroups) {
+                    try {
+                        if (await isAdmin(g._id, userId)) {
+                            const chat = await bot.getChat(g._id);
+                            userGroups.push({ id: g._id, title: chat.title || 'Unknown Group' });
+                        }
+                    } catch (e) { }
+                }
+                const buttons = userGroups.map(g => [{ text: g.title, callback_data: `DASH_SEL_${g.id}` }]);
+                bot.editMessageText('Select a group to configure:', { chat_id: message.chat.id, message_id: message.message_id, reply_markup: { inline_keyboard: buttons } });
+            }
         }
     });
 };
