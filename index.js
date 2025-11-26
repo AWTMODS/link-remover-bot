@@ -48,6 +48,15 @@ const DASH_USER = process.env.DASHBOARD_USER || 'admin';
 const DASH_PASS = process.env.DASHBOARD_PASS || 'password';
 const DASH_PORT = process.env.DASHBOARD_PORT || 3000;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(x => Number(x.trim())) : [];
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+
+// Defaults
+const DEF_CAPTCHA = process.env.DEFAULT_CAPTCHA === 'false' ? false : true;
+const DEF_AUTOBAN = process.env.DEFAULT_AUTO_BAN === 'false' ? false : true;
+const DEF_FLOOD = parseInt(process.env.DEFAULT_FLOOD_LIMIT || '5');
+const DEF_STICKER = process.env.DEFAULT_BLOCK_STICKERS === 'true';
+const DEF_GIF = process.env.DEFAULT_BLOCK_GIFS === 'true';
+const DEF_VOICE = process.env.DEFAULT_BLOCK_VOICE === 'true';
 
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN missing in .env. Exiting.');
@@ -62,7 +71,7 @@ if (!MONGO_URI) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // ---- MongoDB Setup ----
-let dbClient, db, groupsCol, globalsCol, statsCol;
+let dbClient, db, groupsCol, globalsCol, statsCol, warningsCol;
 
 async function connectMongo() {
   dbClient = new MongoClient(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
@@ -71,6 +80,7 @@ async function connectMongo() {
   groupsCol = db.collection('groups');
   globalsCol = db.collection('globals');
   statsCol = db.collection('stats');
+  warningsCol = db.collection('warnings');
 
   // ensure globals doc
   const g = await globalsCol.findOne({ _id: 'globals' });
@@ -98,13 +108,17 @@ async function getGroup(chatId) {
   if (!g) {
     g = {
       _id: id,
-      captcha: true,
-      autoBan: true,
-      floodLimit: 5,
+      captcha: DEF_CAPTCHA,
+      autoBan: DEF_AUTOBAN,
+      floodLimit: DEF_FLOOD,
       floodWindowSec: 7,
       welcome: 'Welcome! Please solve the captcha when prompted.',
       whitelist: [],
-      blacklist: []
+      blacklist: [],
+      whitelistDomains: [],
+      blockStickers: DEF_STICKER,
+      blockGifs: DEF_GIF,
+      blockVoice: DEF_VOICE
     };
     await groupsCol.insertOne(g);
   }
@@ -123,10 +137,33 @@ async function getStats(chatId) {
   return (await statsCol.findOne({ _id: String(chatId) })) || { banned: 0, kicked: 0, deleted: 0 };
 }
 
+async function logAction(chatId, action, details) {
+  const msg = `#${action}\nChat: ${chatId}\n${details}`;
+  console.log(msg);
+  if (LOG_CHANNEL_ID) {
+    try { await bot.sendMessage(LOG_CHANNEL_ID, msg); } catch (e) { console.error('Failed to log to channel:', e.message); }
+  }
+}
+
+async function addWarning(chatId, userId, reason) {
+  const key = `${chatId}_${userId}`;
+  await warningsCol.updateOne(
+    { _id: key },
+    { $inc: { count: 1 }, $set: { lastWarning: Date.now(), reason } },
+    { upsert: true }
+  );
+  const doc = await warningsCol.findOne({ _id: key });
+  return doc.count;
+}
+
+async function clearWarnings(chatId, userId) {
+  await warningsCol.deleteOne({ _id: `${chatId}_${userId}` });
+}
+
 // ---- Detectors & Patterns ----
 const chineseRegex = /[\u4E00-\u9FFF]/;
 const russianRegex = /[\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F]/;
-const urlRegex = /(https?:\/\/|www\.)\S+/i;
+const urlRegex = /((https?:\/\/|www\.)\S+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}\/?)/i;
 const adultKeywords = ['sex', 'porn', 'xxx', '18+', 'adult', 'nude', 'hot']; // extend if needed
 
 const usernameSpamPatterns = [
@@ -190,17 +227,18 @@ async function isUserAdmin(chatId, userId) {
 
 // ---- Moderation actions ----
 async function deleteAndAct(chatId, userId, messageId, reason) {
-  try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* ignore */ }
+  try { await bot.deleteMessage(chatId, messageId); } catch (e) { console.error(`Failed to delete msg ${messageId}:`, e.message); }
+  await logAction(chatId, 'DELETE', `User: ${userId}\nReason: ${reason}`);
   const g = await getGroup(chatId);
   if (g.autoBan) {
-    try { await bot.kickChatMember(chatId, userId); await incStat(chatId, 'banned'); } catch (e) { /* ignore */ }
+    try { await bot.kickChatMember(chatId, userId); await incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
     try {
       await bot.sendMessage(chatId, `🚫 <a href="tg://user?id=${userId}">${userId}</a> was banned for: ${reason}`, { parse_mode: 'HTML' });
-    } catch (e) { /* ignore */ }
+    } catch (e) { console.error('Error:', e.message); }
   } else {
     try {
       await bot.sendMessage(chatId, `⚠️ <a href="tg://user?id=${userId}">${userId}</a> warned for: ${reason}`, { parse_mode: 'HTML' });
-    } catch (e) { /* ignore */ }
+    } catch (e) { console.error('Error:', e.message); }
   }
 }
 
@@ -220,7 +258,7 @@ async function moderateMessage(msg) {
 
   // global/group blacklists
   if ((globals.blacklist || []).includes(userId) || (settings.blacklist || []).includes(userId)) {
-    try { await bot.kickChatMember(chatId, userId); await incStat(chatId, 'banned'); } catch (e) { /* ignore */ }
+    try { await bot.kickChatMember(chatId, userId); await incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
     return;
   }
 
@@ -253,8 +291,29 @@ async function moderateMessage(msg) {
   }
 
   // 4) link spam
+  // 4) link spam
   if (urlRegex.test(lower)) {
-    await deleteAndAct(chatId, userId, msg.message_id, 'Link detected');
+    // check whitelist domains
+    const allowedDomains = settings.whitelistDomains || [];
+    const isWhitelisted = allowedDomains.some(d => lower.includes(d.toLowerCase()));
+
+    if (!isWhitelisted) {
+      await deleteAndAct(chatId, userId, msg.message_id, 'Link detected');
+      return;
+    }
+  }
+
+  // 6) Media Filters
+  if (settings.blockStickers && msg.sticker) {
+    await deleteAndAct(chatId, userId, msg.message_id, 'Stickers not allowed');
+    return;
+  }
+  if (settings.blockGifs && (msg.animation || (msg.document && msg.document.mime_type === 'video/mp4'))) {
+    await deleteAndAct(chatId, userId, msg.message_id, 'GIFs not allowed');
+    return;
+  }
+  if (settings.blockVoice && msg.voice) {
+    await deleteAndAct(chatId, userId, msg.message_id, 'Voice notes not allowed');
     return;
   }
 
@@ -288,7 +347,7 @@ bot.on('message', async (msg) => {
 
       for (const user of msg.new_chat_members) {
         if (user.is_bot) {
-          try { await bot.kickChatMember(chatId, user.id); await incStat(chatId, 'banned'); } catch (e) { /* ignore */ }
+          try { await bot.kickChatMember(chatId, user.id); await incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
           continue;
         }
 
@@ -299,7 +358,7 @@ bot.on('message', async (msg) => {
 
         if (settings.captcha) {
           // restrict and send captcha
-          try { await bot.restrictChatMember(chatId, user.id, { can_send_messages: false }); } catch (e) { /* ignore */ }
+          try { await bot.restrictChatMember(chatId, user.id, { can_send_messages: false }); } catch (e) { console.error('Error:', e.message); }
 
           const cap = generateCaptcha();
           const key = `${chatId}_${user.id}`;
@@ -308,14 +367,14 @@ bot.on('message', async (msg) => {
           try {
             const sent = await bot.sendMessage(chatId, `${settings.welcome}\n\nPlease solve this captcha within 120 seconds: ${cap.question}`);
             captchaStore[key].welcomeMsgId = sent.message_id;
-          } catch (e) { /* ignore */ }
+          } catch (e) { console.error('Error:', e.message); }
 
           // schedule kick if not solved
           setTimeout(async () => {
             const stored = captchaStore[key];
             if (!stored) return;
             if (Date.now() > stored.expiresAt) {
-              try { await bot.kickChatMember(chatId, user.id); await incStat(chatId, 'banned'); } catch (e) { /* ignore */ }
+              try { await bot.kickChatMember(chatId, user.id); await incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
               delete captchaStore[key];
             }
           }, 125000);
@@ -325,7 +384,7 @@ bot.on('message', async (msg) => {
             await bot.restrictChatMember(chatId, user.id, {
               can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
             });
-          } catch (e) { /* ignore */ }
+          } catch (e) { console.error('Error:', e.message); }
         }
       }
     }
@@ -345,17 +404,17 @@ bot.on('message', async (msg) => {
               can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true
             });
             await bot.sendMessage(chatId, `✅ <a href="tg://user?id=${msg.from.id}">${msg.from.first_name}</a> passed the captcha.`, { parse_mode: 'HTML' });
-          } catch (e) { /* ignore */ }
+          } catch (e) { console.error('Error:', e.message); }
           delete captchaStore[key];
           return;
         } else {
           stored.tries++;
           if (stored.tries >= 3) {
-            try { await bot.kickChatMember(chatId, msg.from.id); await incStat(chatId, 'banned'); } catch (e) { /* ignore */ }
+            try { await bot.kickChatMember(chatId, msg.from.id); await incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
             delete captchaStore[key];
             return;
           } else {
-            try { await bot.sendMessage(chatId, `❌ Wrong answer. Try again. (${3 - stored.tries} tries left)`, { reply_to_message_id: stored.welcomeMsgId }); } catch (e) { /* ignore */ }
+            try { await bot.sendMessage(chatId, `❌ Wrong answer. Try again. (${3 - stored.tries} tries left)`, { reply_to_message_id: stored.welcomeMsgId }); } catch (e) { console.error('Error:', e.message); }
             return;
           }
         }
@@ -433,7 +492,136 @@ bot.onText(/\/stats/, async (msg) => {
   const chatId = String(msg.chat.id);
   if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
   const st = await getStats(chatId);
-  bot.sendMessage(chatId, `Stats: banned=${st.banned||0} kicked=${st.kicked||0} deleted=${st.deleted||0}`);
+  bot.sendMessage(chatId, `Stats: banned=${st.banned || 0} kicked=${st.kicked || 0} deleted=${st.deleted || 0}`);
+});
+
+bot.onText(/\/warn\s+(\d+)(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
+  const targetId = Number(match[1]);
+  const reason = match[2] || 'No reason provided';
+
+  const count = await addWarning(chatId, targetId, reason);
+  await logAction(chatId, 'WARN', `Target: ${targetId}\nReason: ${reason}\nCount: ${count}`);
+
+  if (count >= 3) {
+    try {
+      await bot.kickChatMember(chatId, targetId);
+      await incStat(chatId, 'banned');
+      await clearWarnings(chatId, targetId);
+      bot.sendMessage(chatId, `🚫 <a href="tg://user?id=${targetId}">${targetId}</a> banned after 3 warnings.`, { parse_mode: 'HTML' });
+      await logAction(chatId, 'BAN_AUTO', `Target: ${targetId}\nReason: 3 Warnings`);
+    } catch (e) {
+      bot.sendMessage(chatId, `Failed to ban ${targetId}: ${e.message}`);
+    }
+  } else {
+    bot.sendMessage(chatId, `⚠️ <a href="tg://user?id=${targetId}">${targetId}</a> warned (${count}/3).\nReason: ${reason}`, { parse_mode: 'HTML' });
+  }
+});
+
+bot.onText(/\/mute\s+(\d+)(?:\s+(\d+))?/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
+  const targetId = Number(match[1]);
+  const minutes = Number(match[2]) || 60; // default 60 mins
+
+  try {
+    const until = Math.floor(Date.now() / 1000) + (minutes * 60);
+    await bot.restrictChatMember(chatId, targetId, {
+      until_date: until,
+      can_send_messages: false,
+      can_send_media_messages: false,
+      can_send_other_messages: false,
+      can_add_web_page_previews: false
+    });
+    bot.sendMessage(chatId, `🔇 <a href="tg://user?id=${targetId}">${targetId}</a> muted for ${minutes} minutes.`, { parse_mode: 'HTML' });
+    await logAction(chatId, 'MUTE', `Target: ${targetId}\nDuration: ${minutes}m`);
+  } catch (e) {
+    bot.sendMessage(chatId, `Failed to mute: ${e.message}`);
+  }
+});
+
+bot.onText(/\/unmute\s+(\d+)/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
+  const targetId = Number(match[1]);
+
+  try {
+    await bot.restrictChatMember(chatId, targetId, {
+      can_send_messages: true,
+      can_send_media_messages: true,
+      can_send_other_messages: true,
+      can_add_web_page_previews: true
+    });
+    bot.sendMessage(chatId, `🔊 <a href="tg://user?id=${targetId}">${targetId}</a> unmuted.`, { parse_mode: 'HTML' });
+    await logAction(chatId, 'UNMUTE', `Target: ${targetId}`);
+  } catch (e) {
+    bot.sendMessage(chatId, `Failed to unmute: ${e.message}`);
+  }
+});
+
+bot.onText(/\/linkwhitelist\s+(add|remove)\s+(.+)/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
+  const action = match[1];
+  const domain = match[2].trim().toLowerCase();
+  const s = await getGroup(chatId);
+  let arr = s.whitelistDomains || [];
+
+  if (action === 'add') {
+    arr.push(domain); arr = Array.from(new Set(arr));
+    await upsertGroup(chatId, { whitelistDomains: arr });
+    bot.sendMessage(chatId, `Added ${domain} to link whitelist.`);
+  } else {
+    arr = arr.filter(d => d !== domain);
+    await upsertGroup(chatId, { whitelistDomains: arr });
+    bot.sendMessage(chatId, `Removed ${domain} from link whitelist.`);
+  }
+});
+
+bot.onText(/\/toggle\s+(sticker|gif|voice)\s+(on|off)/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  if (!await isUserAdmin(chatId, msg.from.id) && !ADMIN_IDS.includes(msg.from.id)) return;
+  const type = match[1].toLowerCase();
+  const state = match[2].toLowerCase() === 'on'; // on = block enabled
+
+  const patch = {};
+  if (type === 'sticker') patch.blockStickers = state;
+  if (type === 'gif') patch.blockGifs = state;
+  if (type === 'voice') patch.blockVoice = state;
+
+  await upsertGroup(chatId, patch);
+  bot.sendMessage(chatId, `Blocking ${type}s is now ${state ? 'ENABLED' : 'DISABLED'}.`);
+});
+
+bot.onText(/\/report/, async (msg) => {
+  const chatId = String(msg.chat.id);
+  if (!msg.reply_to_message) {
+    return bot.sendMessage(chatId, 'Reply to a message to report it.');
+  }
+
+  const reportedMsg = msg.reply_to_message;
+  const reporter = msg.from;
+  const reportedUser = reportedMsg.from;
+
+  const reportText = `🚨 <b>REPORT</b> 🚨\n\n<b>Group:</b> ${msg.chat.title}\n<b>Reporter:</b> <a href="tg://user?id=${reporter.id}">${reporter.first_name}</a>\n<b>Reported User:</b> <a href="tg://user?id=${reportedUser.id}">${reportedUser.first_name}</a>\n<b>Message:</b> ${reportedMsg.text || '[Media]'}\n<a href="https://t.me/c/${chatId.replace('-100', '')}/${reportedMsg.message_id}">Link to message</a>`;
+
+  // Notify admins
+  try {
+    const admins = await bot.getChatAdministrators(chatId);
+    for (const admin of admins) {
+      if (!admin.user.is_bot) {
+        try {
+          await bot.sendMessage(admin.user.id, reportText, { parse_mode: 'HTML' });
+        } catch (e) { /* admin might not have started bot in private */ }
+      }
+    }
+    bot.sendMessage(chatId, 'Report sent to admins.', { reply_to_message_id: msg.message_id });
+    await logAction(chatId, 'REPORT', `Reporter: ${reporter.id}\nTarget: ${reportedUser.id}`);
+  } catch (e) {
+    console.error('Report error:', e.message);
+    bot.sendMessage(chatId, 'Failed to send report.');
+  }
 });
 
 // ---- Simple Admin Dashboard ----
@@ -453,7 +641,7 @@ app.get('/', checkAuth, async (req, res) => {
     const globals = await getGlobals();
     const groups = await groupsCol.find({}).limit(200).toArray();
     const stats = await statsCol.find({}).limit(200).toArray();
-    res.send(`<h2>Bot Admin Dashboard</h2><pre>Globals: ${JSON.stringify(globals,null,2)}</pre><pre>Groups (sample): ${JSON.stringify(groups,null,2)}</pre><pre>Stats (sample): ${JSON.stringify(stats,null,2)}</pre>`);
+    res.send(`<h2>Bot Admin Dashboard</h2><pre>Globals: ${JSON.stringify(globals, null, 2)}</pre><pre>Groups (sample): ${JSON.stringify(groups, null, 2)}</pre><pre>Stats (sample): ${JSON.stringify(stats, null, 2)}</pre>`);
   } catch (e) {
     res.status(500).send('Error fetching dashboard data');
   }
@@ -464,12 +652,12 @@ app.listen(DASH_PORT, () => console.log(`Admin dashboard running at http://local
 // ---- Graceful shutdown ----
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
-  try { if (dbClient) await dbClient.close(); } catch (e) {}
+  try { if (dbClient) await dbClient.close(); } catch (e) { }
   process.exit();
 });
 process.on('SIGTERM', async () => {
   console.log('Shutting down gracefully...');
-  try { if (dbClient) await dbClient.close(); } catch (e) {}
+  try { if (dbClient) await dbClient.close(); } catch (e) { }
   process.exit();
 });
 
