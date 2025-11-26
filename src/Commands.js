@@ -80,7 +80,7 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
         const chatId = String(msg.chat.id);
         if (!await isAdmin(chatId, msg.from.id)) return;
         const uid = Number(match[1]);
-        try { await bot.kickChatMember(chatId, uid); await db.incStat(chatId, 'banned'); bot.sendMessage(chatId, 'User banned.'); } catch (e) { bot.sendMessage(chatId, 'Failed to ban. Make sure I have admin rights.'); }
+        try { await bot.banChatMember(chatId, uid); await db.incStat(chatId, 'banned'); bot.sendMessage(chatId, 'User banned.'); } catch (e) { bot.sendMessage(chatId, 'Failed to ban. Make sure I have admin rights.'); }
     });
 
     bot.onText(/\/unban\s+(\d+)/, async (msg, match) => {
@@ -108,7 +108,7 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
 
         if (count >= 3) {
             try {
-                await bot.kickChatMember(chatId, targetId);
+                await bot.banChatMember(chatId, targetId);
                 await db.incStat(chatId, 'banned');
                 await db.clearWarnings(chatId, targetId);
                 bot.sendMessage(chatId, `🚫 <a href="tg://user?id=${targetId}">${targetId}</a> banned after 3 warnings.`, { parse_mode: 'HTML' });
@@ -324,7 +324,7 @@ module.exports = function (bot, db, moderator, captcha, adminIds) {
                 stored.tries++;
                 if (stored.tries >= 3) {
                     try {
-                        await bot.kickChatMember(chatId, targetUserId);
+                        await bot.banChatMember(chatId, targetUserId);
                         await db.incStat(chatId, 'banned');
                         await bot.deleteMessage(chatId, message.message_id);
                     } catch (e) { }

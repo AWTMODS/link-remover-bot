@@ -61,7 +61,7 @@ class Moderator {
 
         const g = await this.db.getGroup(chatId);
         if (g.autoBan) {
-            try { await bot.kickChatMember(chatId, userId); await this.db.incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
+            try { await bot.banChatMember(chatId, userId); await this.db.incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
             try {
                 await bot.sendMessage(chatId, `🚫 <a href="tg://user?id=${userId}">${userId}</a> was banned for: ${reason}`, { parse_mode: 'HTML' });
             } catch (e) { console.error('Error:', e.message); }
@@ -96,7 +96,7 @@ class Moderator {
 
         // global/group blacklists
         if ((globals.blacklist || []).includes(userId) || (settings.blacklist || []).includes(userId)) {
-            try { await bot.kickChatMember(chatId, userId); await this.db.incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
+            try { await bot.banChatMember(chatId, userId); await this.db.incStat(chatId, 'banned'); } catch (e) { console.error('Error:', e.message); }
             return;
         }
 

@@ -52,7 +52,7 @@ bot.on('message', async (msg) => {
 
       for (const user of msg.new_chat_members) {
         if (user.is_bot) {
-          try { await bot.kickChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { }
+          try { await bot.banChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { }
           continue;
         }
 
@@ -89,7 +89,7 @@ bot.on('message', async (msg) => {
             const stored = captcha.get(chatId, user.id);
             if (!stored) return;
             if (Date.now() > stored.expiresAt) {
-              try { await bot.kickChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { }
+              try { await bot.banChatMember(chatId, user.id); await db.incStat(chatId, 'banned'); } catch (e) { }
               captcha.delete(chatId, user.id);
             }
           }, 125000);
